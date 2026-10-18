@@ -1,1 +1,0 @@
-{"v": 1, "kind": "slice", "key": "b9ce835c8d26d5439ee41f91fce7369035fbe7eaddafa40a0c8a0cc897e61f72", "payload": {"text": "[console_scripts]\nghostverify = ghostverify.cli:main\n", "original_tokens": 17, "sliced_tokens": 17, "language": "text"}}

@@ -1,0 +1,10 @@
+--- a/app.py
++++ b/app.py
+@@ -7,3 +7,7 @@
+ def checkout(items):
+     """Return the formatted checkout total for a list of prices."""
+     return format_total(compute_total(items))
++
++
++def refund(items):
++    return format_total(process_refund(items))

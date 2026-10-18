@@ -1,1 +1,0 @@
-{"v": 1, "kind": "slice", "key": "2ad8a981ab19c9f15cf3db8ca906cd044a213c1963d3980d941770c423b2914f", "payload": {"text": "\"\"\"Pricing rules for the mini fixture project.\"\"\"\n\nTAX_RATE = 0.08\n\ndef compute_total(items):\n\n    \"\"\"Sum item prices and apply the tax rate.\"\"\"\n\n    ...\n", "original_tokens": 60, "sliced_tokens": 46, "language": "python"}}

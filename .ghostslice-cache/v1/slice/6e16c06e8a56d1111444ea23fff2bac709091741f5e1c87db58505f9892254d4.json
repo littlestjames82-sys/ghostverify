@@ -1,1 +1,0 @@
-{"v": 1, "kind": "slice", "key": "6e16c06e8a56d1111444ea23fff2bac709091741f5e1c87db58505f9892254d4", "payload": {"text": "\"\"\"Formatting helpers for the mini fixture project.\"\"\"\n\ndef format_total(amount):\n\n    \"\"\"Format an amount as a dollar string.\"\"\"\n\n    ...\n", "original_tokens": 52, "sliced_tokens": 42, "language": "python"}}

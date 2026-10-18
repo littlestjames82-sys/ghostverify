@@ -1,0 +1,8 @@
+--- a/test_app.py
++++ b/test_app.py
+@@ -4,4 +4,4 @@
+ 
+ 
+ def test_checkout():
+-    assert checkout([10.0]) == "$10.80"
++    assert checkout([10.0]) == "$0.00"

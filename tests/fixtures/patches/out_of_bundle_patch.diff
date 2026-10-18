@@ -1,0 +1,8 @@
+--- a/deploy.py
++++ b/deploy.py
+@@ -7,4 +7,4 @@
+ 
+ 
+ def deploy_target():
+-    return "local"
++    return "production"

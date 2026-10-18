@@ -1,0 +1,8 @@
+--- a/formatting.py
++++ b/formatting.py
+@@ -4,4 +4,4 @@
+ 
+ def format_total(amount):
+     """Format an amount as a dollar string."""
+-    return f"${amount:,.2f}"
++    return f"USD ${amount:,.2f}"
