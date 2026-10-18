@@ -17,10 +17,14 @@ HONESTY = ("no gaps found by static check is evidence, not a "
 
 
 def default_out_dir(bundle_path) -> Path:
+    """Default report location: the bundle's parent directory
+    (next to the bundle, never inside it)."""
     return Path(bundle_path).resolve().parent
 
 
 def write_reports(report: dict, out_dir) -> tuple[Path, Path]:
+    """Write ``verify-report.json`` and ``VERIFY.md`` into
+    ``out_dir`` (created if needed); returns both paths."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     json_path = out / "verify-report.json"
@@ -31,6 +35,7 @@ def write_reports(report: dict, out_dir) -> tuple[Path, Path]:
 
 
 def render_markdown(report: dict) -> str:
+    """Render a report dict as the human-readable ``VERIFY.md``."""
     lines = [
         "# GhostVerify report",
         "",
@@ -75,6 +80,10 @@ def render_markdown(report: dict) -> str:
         lines.append("- None.")
     lines += ["", f"OK-STUB symbols (signatures kept, no body needed): "
               f"{report.get('ok_stub_count', 0)}", ""]
+    if report.get("fixture_references") is not None:
+        lines += [f"Test-fixture references followed (parameter "
+                  f"injection + usefixtures): "
+                  f"{report['fixture_references']}", ""]
     ungrounded = report.get("ungrounded_requirements") or []
     if ungrounded:
         lines += ["## Ungrounded requirements (not gaps)", "",

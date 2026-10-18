@@ -45,6 +45,10 @@ TOOLS = [
 
 
 def _capped(report: dict) -> dict:
+    """Shrink a report for an MCP response: gap lists are capped
+    at GAP_CAP (with ``*_truncated`` / ``*_total`` markers when
+    cut) and carry-over detail is replaced by counts. No raw file
+    bodies are ever included."""
     out = {k: v for k, v in report.items() if k not in ("carryover",)}
     for key in ("gaps", "soft_gaps"):
         rows = out.get(key) or []
@@ -130,6 +134,8 @@ def handle_message(msg):
 
 
 def run_stdio(instream=None, outstream=None) -> None:
+    """Serve newline-delimited JSON-RPC until the input stream
+    ends. Blank, unparseable, and non-object lines are skipped."""
     instream = instream or sys.stdin
     outstream = outstream or sys.stdout
     for line in instream:
@@ -139,8 +145,21 @@ def run_stdio(instream=None, outstream=None) -> None:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
+            # JSON-RPC parse error: answer (id unknown -> null)
+            # instead of staying silent and leaving the client
+            # waiting on a response that will never come.
+            resp = {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32700, "message": "parse error"}}
+            outstream.write(json.dumps(resp) + "\n")
+            outstream.flush()
             continue
         if not isinstance(msg, dict):
+            resp = {"jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600,
+                              "message": "invalid request: expected a "
+                                         "JSON object"}}
+            outstream.write(json.dumps(resp) + "\n")
+            outstream.flush()
             continue
         resp = handle_message(msg)
         if resp is not None:

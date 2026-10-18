@@ -15,6 +15,14 @@ graph, and reports must label that confidence difference.
   symbols (a slice cannot include or exclude a local); they are
   kept in Project.local_names so task mentions of them surface as
   ungrounded requirements, never as gap symbols.
+- a name bound as a function/lambda parameter is a local for
+  that body: loads and calls of it never resolve to a same-named
+  project symbol (parameter shadowing).
+- pytest fixtures are referenced by name, never called: a test
+  function or another fixture that names a @pytest.fixture
+  definition as a parameter, and any def/class carrying a
+  usefixtures marker, gets a 'fixture' edge to that definition
+  (same file first, then conftest.py, then a unique match).
 """
 from __future__ import annotations
 
@@ -51,10 +59,16 @@ DEFAULT_CONFIDENCE = "parser-lite (import graph + outline)"
 
 
 def language_for(path: str) -> str:
+    """Language name for a project-relative path, by extension
+    ('text' when the extension is not recognised)."""
     return LANG_BY_EXT.get(Path(path).suffix.lower(), "text")
 
 
 def is_test_path(rel: str) -> bool:
+    """True when a project-relative path looks like a test file,
+    by directory name (tests/, spec/, ...) or file name
+    (test_*, *_test.go, *.spec.*, ...). Used by ``post`` to flag,
+    not reject, patches that edit tests."""
     p = PurePosixPath(rel)
     name = p.name.lower()
     if any(part in ("tests", "test", "__tests__", "spec", "specs")
@@ -73,6 +87,11 @@ class Symbol:
     qualified: str
     kind: str          # function|method|class|constant|type
     language: str
+    # True when decorated with @pytest.fixture / @fixture: such a
+    # definition is reachable by NAME (parameter injection and
+    # usefixtures markers), never by a call or import edge, so the
+    # edge builder needs to know which definitions are fixtures.
+    is_fixture: bool = False
 
     @property
     def callable(self) -> bool:
@@ -105,6 +124,13 @@ class Project:
 
 
 def scan_project(root) -> Project:
+    """Scan a project tree into a Project (files, symbols, edges).
+
+    Binary files, tool ledgers, and ignored directories (see
+    IGNORE_DIRS) are skipped. Raises FileNotFoundError when ``root``
+    is not a directory. Python files are analysed first for symbols,
+    then in a second pass for call/reference edges, so cross-file
+    calls resolve regardless of file order."""
     root = Path(root).expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"project is not a directory: {root}")
@@ -204,6 +230,39 @@ def _module_file(base: str, root_files: set) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def _decorator_tail(dec) -> str:
+    """Last dotted component of a decorator expression, unwrapping
+    a call: @pytest.fixture(...) -> 'fixture', @mark.x -> 'x'."""
+    node = dec.func if isinstance(dec, ast.Call) else dec
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return parts[0] if parts else ""
+
+
+def _is_fixture_decorator(dec) -> bool:
+    return _decorator_tail(dec) == "fixture"
+
+
+def _usefixtures_names(decorators) -> list[str]:
+    """Fixture names requested by @...usefixtures("a", "b")
+    markers on a def/class: pytest resolves these by name too,
+    even though no parameter (and no call) ever mentions them."""
+    out: list[str] = []
+    for dec in decorators:
+        if not isinstance(dec, ast.Call):
+            continue
+        if _decorator_tail(dec) != "usefixtures":
+            continue
+        for arg in dec.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                out.append(arg.value)
+    return out
+
+
 def _analyse_python(proj: Project, rel: str) -> None:
     source = proj.sources[rel]
     try:
@@ -229,6 +288,8 @@ def _analyse_python(proj: Project, rel: str) -> None:
                 q = f"{prefix}.{node.name}" if prefix else node.name
                 add(q, "method" if prefix and "." not in prefix and prefix else
                     ("method" if prefix else "function"))
+                if any(_is_fixture_decorator(d) for d in node.decorator_list):
+                    symbols[q].is_fixture = True
                 # fix kind: direct child of a class is a method; we
                 # know class prefixes via the second walk below, so
                 # recompute in walk_classes. Keep simple: a def whose
@@ -240,6 +301,9 @@ def _analyse_python(proj: Project, rel: str) -> None:
                 for sub in node.body:
                     if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         add(f"{q}.{sub.name}", "method")
+                        if any(_is_fixture_decorator(d)
+                               for d in sub.decorator_list):
+                            symbols[f"{q}.{sub.name}"].is_fixture = True
                         walk_defs(sub.body, f"{q}.{sub.name}")
                     elif isinstance(sub, ast.ClassDef):
                         walk_defs([sub], q)
@@ -351,32 +415,94 @@ def _python_edges(proj: Project, rel: str) -> None:
                                "kind": kind, "path": rel,
                                "callee_path": proj.symbols[callee_id].path})
 
-    def visit(node, caller_id, prefixes):
+    def add_fixture_edges(caller_id, names):
+        """Fixture references are by name, not by call. Resolution
+        mirrors pytest's override order closely enough for static
+        evidence: a fixture defined in the requesting file wins,
+        then conftest.py fixtures, then a single unambiguous
+        project-wide fixture. Ambiguous same-name fixtures in
+        unrelated modules are left unresolved rather than fanned
+        out into phantom gaps."""
+        for name in names:
+            if name in ("self", "cls"):
+                continue
+            cands = [s for s in proj.symbols_by_name.get(name, [])
+                     if s.is_fixture and s.id != caller_id]
+            if not cands:
+                continue
+            same = [s for s in cands if s.path == rel]
+            conftest = [s for s in cands
+                        if PurePosixPath(s.path).name == "conftest.py"]
+            chosen = same or conftest or (cands if len(cands) == 1 else [])
+            for sym in chosen:
+                add_edge(caller_id, sym.id, "fixture")
+
+    def param_names(args) -> list[str]:
+        names = [a.arg for a in list(args.posonlyargs) + list(args.args)
+                 + list(args.kwonlyargs)]
+        if args.vararg:
+            names.append(args.vararg.arg)
+        if args.kwarg:
+            names.append(args.kwarg.arg)
+        return names
+
+    def visit(node, caller_id, prefixes, bound=frozenset()):
+        # `bound` holds names bound as parameters of enclosing
+        # functions/lambdas: a load or call of such a name is a
+        # local, never a reference to a same-named project symbol.
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             q = _qualified_of(node, prefixes, symbols)
             cid = f"{rel}:{q}" if q else caller_id
+            # Pytest fixture injection: a test function (test_*)
+            # or another fixture receives fixtures through its
+            # parameter NAMES; conftest.py functions may also
+            # request them (fixtures and hooks live there).
+            # Ordinary functions never get injection, so a plain
+            # parameter that happens to share a fixture's name is
+            # not a reference.
+            own = symbols.get(q)
+            requesting = (
+                node.name.startswith("test_")
+                or (own is not None and own.is_fixture)
+                or PurePosixPath(rel).name == "conftest.py")
+            params = param_names(node.args)
+            if requesting:
+                add_fixture_edges(cid, params)
+            add_fixture_edges(cid, _usefixtures_names(node.decorator_list))
             for dec in node.decorator_list:
-                visit(dec, caller_id, prefixes)
+                visit(dec, caller_id, prefixes, bound)
             for d in list(node.args.defaults) + [d for d in node.args.kw_defaults if d]:
-                visit(d, caller_id, prefixes)
+                visit(d, caller_id, prefixes, bound)
             if node.returns is not None:
                 _reference(node.returns, caller_id, prefixes, imports, add_edge)
+            inner = bound | frozenset(params)
             for stmt in node.body:
-                visit(stmt, cid, prefixes + [q] if q else prefixes)
+                visit(stmt, cid, prefixes + [q] if q else prefixes, inner)
+            return
+        if isinstance(node, ast.Lambda):
+            inner = bound | frozenset(param_names(node.args))
+            visit(node.body, caller_id, prefixes, inner)
             return
         if isinstance(node, ast.ClassDef):
             for base in node.bases:
                 _reference(base, caller_id, prefixes, imports, add_edge)
             q = _qualified_of(node, prefixes, symbols)
+            # A class-level usefixtures marker makes every test in
+            # the class request the named fixtures by name.
+            class_id = f"{rel}:{q}" if q else caller_id
+            add_fixture_edges(class_id,
+                              _usefixtures_names(node.decorator_list))
             for stmt in node.body:
-                visit(stmt, caller_id, prefixes + [q] if q else prefixes)
+                visit(stmt, caller_id, prefixes + [q] if q else prefixes,
+                      bound)
             return
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name):
-                target, kind = resolve_bare(func.id, prefixes)
-                if target:
-                    add_edge(caller_id, target, kind)
+                if func.id not in bound:
+                    target, kind = resolve_bare(func.id, prefixes)
+                    if target:
+                        add_edge(caller_id, target, kind)
             elif isinstance(func, ast.Attribute):
                 recv = func.value
                 if isinstance(recv, ast.Name) and recv.id in imports:
@@ -387,21 +513,22 @@ def _python_edges(proj: Project, rel: str) -> None:
                             add_edge(caller_id, cand, "exact")
                 for cand in methods_by_name.get(func.attr, []):
                     add_edge(caller_id, cand, "attribute")
-            visit(func, caller_id, prefixes)
+            visit(func, caller_id, prefixes, bound)
             for a in node.args:
-                visit(a, caller_id, prefixes)
+                visit(a, caller_id, prefixes, bound)
             for kw in node.keywords:
-                visit(kw.value, caller_id, prefixes)
+                visit(kw.value, caller_id, prefixes, bound)
             return
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-            target, _k = resolve_bare(node.id, prefixes)
-            if target:
-                add_edge(caller_id, target, "reference")
+            if node.id not in bound:
+                target, _k = resolve_bare(node.id, prefixes)
+                if target:
+                    add_edge(caller_id, target, "reference")
             return
         if isinstance(node, ast.AnnAssign) and node.annotation is not None:
             _reference(node.annotation, caller_id, prefixes, imports, add_edge)
         for child in ast.iter_child_nodes(node):
-            visit(child, caller_id, prefixes)
+            visit(child, caller_id, prefixes, bound)
 
     module_id = f"{rel}:<module>"
     for stmt in tree.body:

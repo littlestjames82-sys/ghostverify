@@ -36,13 +36,7 @@ def ghostslice_module():
         env = os.environ.get("GHOSTSLICE_SRC")
         if env:
             candidates.append(Path(env))
-        # src/ghostverify/gsload.py -> parents: ghostverify, src,
-        # ghostverify project root, workspace root.
-        try:
-            workspace = Path(__file__).resolve().parents[3]
-            candidates.append(workspace / "ghostslice" / "src")
-        except IndexError:
-            pass
+        candidates.extend(_sibling_candidates())
         for cand in candidates:
             if (cand / "ghostslice" / "__init__.py").is_file():
                 sys.path.insert(0, str(cand))
@@ -51,6 +45,30 @@ def ghostslice_module():
                     break
     _CACHE["mod"] = mod
     return mod
+
+
+def _sibling_candidates() -> list[Path]:
+    """Sibling-checkout candidates: ``<ancestor>/ghostslice/src``
+    for every ancestor of this file, nearest first.
+
+    The standard layout (src/ghostverify/gsload.py, workspace three
+    levels up) is one of these ancestors, but a checkout nested
+    deeper (vendored copies, CI workspaces, test sandboxes) puts
+    the workspace further up; a fixed parents[3] lookup silently
+    missed GhostSlice there and degraded every carry-over and the
+    whole `fix` command to unavailable."""
+    out: list[Path] = []
+    seen: set[Path] = set()
+    try:
+        here = Path(__file__).resolve()
+    except OSError:
+        return out
+    for parent in here.parents:
+        cand = parent / "ghostslice" / "src"
+        if cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+    return out
 
 
 def _try_import():

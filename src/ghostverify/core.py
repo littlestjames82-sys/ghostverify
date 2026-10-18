@@ -27,6 +27,9 @@ _WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _task_terms(task: str) -> set[str]:
+    """Split task text into checkable terms: whole words, the
+    snake_case / camelCase parts of each word (lowercased), and the
+    file name of any path-like mention such as ``pricing.py``."""
     terms: set[str] = set()
     for tok in _WORD_RE.findall(task or ""):
         terms.add(tok.lower())
@@ -69,6 +72,9 @@ def _carryover(project_root: Path, bundle) -> dict:
 
 
 def _base_report(project_root, bundle, task) -> dict:
+    """Report fields shared by every command, before verdicts are
+    filled in. ``bundle_manifest_sha256`` makes a verdict
+    reproducible from the report plus the manifest alone."""
     return {
         "tool": "ghostverify",
         "version": __version__,
@@ -86,7 +92,14 @@ def _base_report(project_root, bundle, task) -> dict:
 
 def run_pre(project_root, bundle_path, task: str = "") -> dict:
     """Pre-flight sufficiency check. Returns the report dict with
-    'exit_code' and 'verdict' filled in."""
+    'exit_code' and 'verdict' filled in.
+
+    The report's ``gaps`` are MISSING-HARD findings (exit 1),
+    ``soft_gaps`` are MISSING-SOFT heuristics that do not fail the
+    verdict on their own, and ``ungrounded_requirements`` are
+    task-derived terms that match no real symbol (reported in plain
+    words, never counted as gaps). A bundle or project that cannot
+    be analysed yields verdict ``could_not_verify``, exit 2."""
     project_root = Path(project_root)
     try:
         bundle = load_bundle(bundle_path)
@@ -120,12 +133,18 @@ def run_pre(project_root, bundle_path, task: str = "") -> dict:
     # state per project file: 'body' | 'stub' | 'excluded' | 'missing'
     state = {rel: bundle.status_of(rel) for rel in proj.files}
     # Symbols explicitly listed by a symbols-mode manifest entry are
-    # body-kept even in an otherwise stub file.
+    # body-kept even in an otherwise stub file -- but only when the
+    # entry actually shipped bytes. Promoting a symbol from an
+    # excluded (or on-disk-absent) entry on the manifest's say-so
+    # alone would let a bundle claim its way to "sufficient" for
+    # content the agent never received (bundle.py's own rule: a
+    # file whose sliced bytes are absent is not kept).
     symbol_state: dict[str, str] = {}
     for sym in proj.symbols.values():
         fstate = state.get(sym.path, "missing")
         bf = bundle.files.get(sym.path)
-        if bf is not None and sym.qualified in bf.symbols_included:
+        if bf is not None and bf.kept \
+                and sym.qualified in bf.symbols_included:
             symbol_state[sym.id] = "body"
         else:
             symbol_state[sym.id] = fstate
@@ -185,19 +204,26 @@ def run_pre(project_root, bundle_path, task: str = "") -> dict:
                                  "type": "MISSING-HARD"}
             continue
         if cstate in ("excluded", "missing"):
-            if edge["kind"] in ("exact", "heuristic", "attribute", "reference"):
+            if edge["kind"] in ("exact", "heuristic", "attribute",
+                                "reference", "fixture"):
                 hard(callee, edge["caller"],
                      f"{edge['kind']} reference from a kept symbol, but "
                      f"this symbol is {cstate} in the bundle")
         elif cstate == "stub":
-            if edge["kind"] in ("exact", "attribute"):
+            if edge["kind"] in ("exact", "attribute", "fixture"):
                 key = callee
                 if key not in soft:
+                    reason = ("heuristic: directly called by a "
+                              "kept symbol but only signatures/"
+                              "interfaces kept, no body")
+                    if edge["kind"] == "fixture":
+                        reason = ("heuristic: requested by name as a "
+                                  "test fixture by a kept test or "
+                                  "fixture, but only signatures/"
+                                  "interfaces kept, no body to run")
                     soft[key] = {"symbol": csym.qualified, "file": csym.path,
                                  "via": edge["caller"],
-                                 "reason": "heuristic: directly called by a "
-                                           "kept symbol but only signatures/"
-                                           "interfaces kept, no body",
+                                 "reason": reason,
                                  "type": "MISSING-SOFT"}
             else:
                 ok_stub += 1
@@ -285,6 +311,13 @@ def run_pre(project_root, bundle_path, task: str = "") -> dict:
     report["gaps"] = sorted(gaps.values(), key=lambda g: (g["file"], g["symbol"]))
     report["soft_gaps"] = sorted(soft.values(), key=lambda g: (g["file"], g["symbol"]))
     report["ok_stub_count"] = ok_stub
+    # Distinct fixture references (parameter injection + usefixtures)
+    # the reachability walk followed; 0 on projects without pytest
+    # fixtures. Evidence for how much of the verdict rests on the
+    # fixture graph rather than the call graph.
+    report["fixture_references"] = len({
+        (e["caller"], e["callee"]) for e in proj.edges
+        if e["kind"] == "fixture"})
     report["visited_symbols"] = len(visited)
     report["confidence"] = {
         lang: proj.confidence_for(lang)
@@ -333,9 +366,15 @@ def run_fix(project_root, bundle_path, out_path, task: str = "") -> dict:
         report["notes"].append("ghostslice exporter unavailable; fix "
                                "requires GhostSlice (no fallback exporter)")
         return report
-    bundle = load_bundle(bundle_path)
-    proj = scan_project(project_root)
-    profile = profile_mod.load_profile(str(project_root))
+    try:
+        bundle = load_bundle(bundle_path)
+        proj = scan_project(project_root)
+        profile = profile_mod.load_profile(str(project_root))
+    except Exception as exc:
+        report.update(verdict="could_not_verify", exit_code=2)
+        report["notes"].append(f"fix setup failed: {exc}")
+        report["expansion_rounds"] = []
+        return report
     protected = set(profile.entry_points or [])
     selections = {p: f.mode for p, f in bundle.files.items()}
     rounds = []
@@ -361,22 +400,47 @@ def run_fix(project_root, bundle_path, out_path, task: str = "") -> dict:
         if not changed:
             rounds.append({"round": rnd, "changed": [],
                            "note": "no upgradeable hard gaps left",
-                           "sliced_tokens": current_report["tokens"]["bundle_sliced"],
+                           "sliced_tokens": (current_report.get("tokens")
+                                             or {}).get("bundle_sliced", 0),
                            "hard_gaps": len(current_report["gaps"])})
             break
         include = set(bundle.files) | set(hard_files)
-        manifest = exporter.build_bundle(str(project_root), str(current_out),
-                                         selections=selections, profile=profile,
-                                         include=include)
+        try:
+            manifest = exporter.build_bundle(str(project_root), str(current_out),
+                                             selections=selections, profile=profile,
+                                             include=include)
+        except Exception as exc:
+            # An exporter failure (disk full, project changed under
+            # us, a GhostSlice plugin error) is a could-not-verify,
+            # not a traceback: the exit-code contract says a bundle
+            # that could not be verified exits 2.
+            report.update(verdict="could_not_verify", exit_code=2)
+            report["notes"].append(f"ghostslice exporter failed during "
+                                   f"fix: {exc}")
+            report["expansion_rounds"] = rounds
+            report["expanded_bundle"] = (
+                str(expanded_path.resolve())
+                if expanded_path is not None and expanded_path.is_dir()
+                else None)
+            return report
         expanded_path = current_out
         current_report = run_pre(project_root, current_out, task)
+        sliced = manifest.get("total_sliced_tokens") \
+            if isinstance(manifest, dict) else None
+        if sliced is None:
+            sliced = (current_report.get("tokens") or {}).get(
+                "bundle_sliced", 0)
         rounds.append({"round": rnd, "changed": changed,
-                       "sliced_tokens": manifest["total_sliced_tokens"],
+                       "sliced_tokens": sliced,
                        "hard_gaps": len(current_report["gaps"])})
         if current_report["exit_code"] == 0:
             break
     report["expansion_rounds"] = rounds
-    report["tokens"]["expanded_sliced"] = current_report["tokens"]["bundle_sliced"]
+    # current_report can be a could_not_verify report (no "tokens"
+    # key) when the freshly exported bundle is itself unreadable.
+    report["tokens"]["expanded_sliced"] = (current_report.get("tokens")
+                                           or {}).get(
+        "bundle_sliced", report["tokens"]["bundle_sliced"])
     report["gaps"] = current_report["gaps"]
     report["soft_gaps"] = current_report["soft_gaps"]
     report["ungrounded_requirements"] = current_report.get(
@@ -393,7 +457,14 @@ def run_fix(project_root, bundle_path, out_path, task: str = "") -> dict:
             "fix wrote no expanded bundle: no hard gap could be "
             "upgraded by re-export, so expanded_bundle is null rather "
             "than a path that does not exist")
-    if current_report["exit_code"] == 0 and rounds:
+    if current_report["exit_code"] == 2 and rounds:
+        # The re-check of the expanded bundle could not verify:
+        # propagate 2 rather than relabelling it "gaps remain".
+        report["verdict"] = "could_not_verify"
+        report["exit_code"] = 2
+        report["notes"].append("expanded bundle could not be verified: "
+                               + "; ".join(current_report.get("notes", [])))
+    elif current_report["exit_code"] == 0 and rounds:
         report["verdict"] = "sufficient_after_expand"
         report["exit_code"] = 0
     elif rounds:
@@ -420,6 +491,13 @@ _KEYWORDS = {"if", "elif", "while", "for", "return", "with", "assert",
 
 
 def _verify_config(project_root: Path) -> dict:
+    """GhostVerify's own per-project config, ``.ghostverify.json``.
+
+    Currently recognised key: ``test_command`` (used by ``post``
+    when ``--run-tests`` is given and no ``--test-command`` was
+    passed). A missing or unparseable file means no config, not an
+    error. Entry points and protected modes are not read here:
+    those come from GhostSlice's ``.ghostslice.json`` profile."""
     cfg = project_root / ".ghostverify.json"
     if cfg.is_file():
         try:
@@ -433,6 +511,22 @@ def _verify_config(project_root: Path) -> dict:
 def run_post(project_root, bundle_path, patch_path, task: str = "",
              run_tests: bool = False, test_command: str | None = None,
              timeout: int = 120) -> dict:
+    """Post-run patch check. Returns the ``run_pre`` report with a
+    ``post`` section added and the verdict/exit code overwritten by
+    the patch outcome (``ok`` = 0, ``flagged``/``failed`` = 1,
+    ``could_not_verify`` = 2).
+
+    Static by default. The patch is applied only to a temporary
+    copy of the project; the working tree is never touched. Tests
+    run only when ``run_tests`` is true, a test command is set
+    (``test_command`` or ``.ghostverify.json``), and the patch
+    applied cleanly to the temp copy."""
+    # A non-positive timeout makes subprocess.run report an instant
+    # "timeout" for commands that never ran; fall back to the
+    # documented default instead of manufacturing that verdict.
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) \
+            or timeout <= 0:
+        timeout = 120
     project_root = Path(project_root)
     report = run_pre(project_root, bundle_path, task)
     report["kind"] = "post"
@@ -496,15 +590,23 @@ def run_post(project_root, bundle_path, patch_path, task: str = "",
                 defs = [s for s in project_by_name.get(name, [])
                         if s.path != rel]
                 if defs:
-                    for sym in defs:
-                        sstate = bundle.status_of(sym.path)
-                        if sstate in ("missing", "excluded"):
-                            findings.append({
-                                "type": "references_unseen_symbol",
-                                "file": rel, "symbol": sym.qualified,
-                                "detail": f"added line calls {name}(), defined "
-                                          f"in {sym.path} which is {sstate} "
-                                          f"in the bundle"})
+                    # The agent saw the name if ANY definition of it
+                    # was in the bundle (body or signatures). Flag
+                    # only when every definition is unseen; flagging
+                    # per-excluded-definition used to condemn a call
+                    # whose name was plainly visible in a kept file
+                    # that also defines it.
+                    if any(bundle.status_of(s.path)
+                           not in ("missing", "excluded") for s in defs):
+                        continue
+                    sym = defs[0]
+                    sstate = bundle.status_of(sym.path)
+                    findings.append({
+                        "type": "references_unseen_symbol",
+                        "file": rel, "symbol": sym.qualified,
+                        "detail": f"added line calls {name}(), defined "
+                                  f"in {sym.path} which is {sstate} "
+                                  f"in the bundle"})
                     continue
                 if any(s.path == rel for s in project_by_name.get(name, [])):
                     continue  # defined in the patched file itself
@@ -546,6 +648,13 @@ def run_post(project_root, bundle_path, patch_path, task: str = "",
                 tests = {"status": "requested but no test command "
                                    "configured (CLI --test-command or "
                                    ".ghostverify.json test_command)"}
+            elif not isinstance(cmd, str):
+                # A hand-edited .ghostverify.json can carry any JSON
+                # type here; subprocess would raise TypeError and
+                # crash the whole post check on a config typo.
+                tests = {"status": "requested but the configured test "
+                                   "command is not a string "
+                                   "(.ghostverify.json test_command)"}
             else:
                 try:
                     proc = subprocess.run(cmd, shell=True, cwd=work,

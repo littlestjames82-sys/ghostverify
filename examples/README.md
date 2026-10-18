@@ -3,7 +3,10 @@
 A three-file demo project (`demo_project/`: `app.py` calls
 `pricing.compute_total` and `formatting.format_total`) and two
 patches (`patches/`) to walk the whole Slice, Verify, patch loop
-by hand. Commands below assume the install from the main README.
+by hand. Commands below assume the install from the main README,
+and are run from the repository root (the folder containing
+`examples/`). Step 3 (`fix`) additionally needs GhostSlice
+importable, as in the main README; steps 1, 2, and 4 do not.
 
 ## 1. Make a bundle with GhostSlice
 
@@ -46,12 +49,18 @@ and the full-project total.
 # Touches only formatting.py, a file the agent saw: passes.
 ghostverify post examples/demo_project /tmp/demo-context-v2 \
   --patch examples/patches/good_patch.diff
+echo $?   # 0: patch verdict ok
 
 # Adds a call to process_refund, a symbol that was never in the
 # bundle and is not created by the patch: flagged.
 ghostverify post examples/demo_project /tmp/demo-context-v2 \
   --patch examples/patches/unseen_symbol_patch.diff
+echo $?   # 1: patch verdict flagged, finding references_unseen_symbol
 ```
+
+The summary line names the patch verdict and, for the flagged
+patch, the finding type; the full findings are in `VERIFY.md` and
+`verify-report.json` next to the bundle (`/tmp/` here).
 
 Post never modifies `demo_project/`: patches are applied to a
 temporary copy only. With no test command configured, post says

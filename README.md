@@ -23,6 +23,25 @@ on both sides of the agent run:
 A passing verdict means **"no gaps found by static check"**. It is
 evidence, not a guarantee that an agent will succeed.
 
+## Which command do I need?
+
+| Situation | Command |
+|---|---|
+| You have a bundle and have not run the agent yet | `pre` |
+| `pre` reported hard gaps and you want a bigger bundle | `fix` |
+| The agent has returned a patch | `post` |
+| Another tool should call the checks | `mcp` (stdio, local only) |
+
+**Do I need GhostSlice installed?** For `pre` and `post`, no:
+GhostVerify works standalone, and only the GhostSlice lint/secret
+carry-over is skipped (the report says so). For `fix`, yes: expansion
+is a fresh GhostSlice export, there is no fallback exporter, and
+without GhostSlice `fix` exits 2 rather than faking a bundle.
+GhostVerify finds GhostSlice when it is importable (installed or on
+`PYTHONPATH`), when `GHOSTSLICE_SRC` points at a checkout's `src/`
+directory, or when a `ghostslice` checkout sits next to this one in
+the same workspace folder.
+
 By Ghost Developer Studio. MIT core (see PLAN.md for the pricing
 posture: free core, paid layer not decided). Zero dependencies:
 Python standard library only, local-first, no network calls, no
@@ -70,6 +89,19 @@ ghostverify fix ~/my-project /tmp/my-context -o /tmp/my-context-v2 \
 ghostverify post ~/my-project /tmp/my-context-v2 --patch agent.diff
 ```
 
+The console output is a short summary; the full evidence is in
+the report files (see Reports). A failing `pre` looks like:
+
+```text
+ghostverify pre: gaps_found (exit 1)
+  MISSING-HARD compute_total in pricing.py: exact reference from a kept symbol, but this symbol is excluded in the bundle
+  note: ...
+```
+
+and a passing one ends with the note `no hard gaps found by
+static check`. Add `--json` to any command to print the full
+report to stdout instead of the summary.
+
 A worked walkthrough with a tiny demo project lives in
 [`examples/`](examples/README.md).
 
@@ -82,6 +114,25 @@ A worked walkthrough with a tiny demo project lives in
 | `ghostverify post <project> <bundle> --patch <file.diff>` | Post-run patch check, static by default. Applies the patch to a temporary copy only. Flags: files touched that are not in the bundle, symbols referenced that are not in the bundle and not created by the patch, and edits to test files. Runs the profile's configured test command in the temp copy, with a timeout, only when one is configured; otherwise it says plainly that it was static-only. |
 | `ghostverify mcp` | Stdio MCP server (local only) exposing `verify_bundle`, `expand_bundle`, `check_patch` with capped summary payloads, no raw file bodies by default. |
 
+`fix` is the only command that needs GhostSlice importable (see
+"Do I need GhostSlice installed?" above). `post` never modifies
+the project: without `--run-tests` it is static-only, and even
+with `--run-tests` the test command runs in the temporary copy.
+
+### Options shared by `pre`, `fix`, and `post`
+
+| Option | Effect |
+|---|---|
+| `--task "..."` | Task text the bundle is for. Files and symbols it names are checked against the bundle. |
+| `--task-file <file>` | Read the task text from a file instead of `--task`. |
+| `--out-dir <dir>` | Write `VERIFY.md` + `verify-report.json` here instead of next to the bundle. |
+| `--no-report` | Do not write the report files. |
+| `--no-ledger` | Do not append a verdict line to the project's `.ghostverify-history.jsonl`. |
+| `--json` | Print the full report as JSON instead of the short summary. |
+
+`post` adds `--patch <file.diff>` (required), `--run-tests`,
+`--test-command <cmd>`, and `--timeout <seconds>` (default 120).
+
 ### How `pre` classifies a finding
 
 | Class | Meaning |
@@ -93,6 +144,21 @@ A worked walkthrough with a tiny demo project lives in
 Task terms are checked the same way: if the task names a file or
 symbol that is not in the bundle at any mode, that is reported
 before the run, not discovered after it.
+
+Test fixtures are checked too (Python projects). Pytest fixtures
+are referenced by name, never called or imported, so the call
+graph alone cannot see them: a test function or another fixture
+that names a `@pytest.fixture` definition as a parameter, and any
+def or class carrying a `usefixtures` marker, counts as reaching
+that fixture. An excluded or absent fixture is therefore
+`MISSING-HARD` by name, a signatures-only fixture is
+`MISSING-SOFT` (its body has to run), and the report counts the
+fixture references followed (`fixture_references`). Resolution
+prefers a fixture in the requesting file, then `conftest.py`,
+then a single unambiguous match; ambiguous same-name fixtures
+are left unresolved rather than guessed at. A name bound as an
+ordinary parameter is a local, not a reference, so a plain
+parameter that shares a fixture's name creates no gap.
 
 Findings carried over from GhostSlice (context lint L001-L010 and
 the secret guard) are surfaced, not re-implemented. Secret findings
@@ -129,13 +195,24 @@ And, in the project:
   GhostVerify appends to this ledger only; it never rewrites
   GhostSlice's `.ghostslice-history.jsonl`.
 
-## Profile
+## Configuration: two files, two jobs
 
-GhostVerify reads GhostSlice's `.ghostslice.json` in the project.
-The profile is where you configure the optional test command for
-`post` and where entry points and protected modes live; those
-modes are never downgraded by `fix`. If no test command is
-configured, `post` is static-only and says so in its report.
+Do not confuse these; they belong to different tools:
+
+- **`.ghostslice.json`** (in the project, GhostSlice's profile):
+  entry points and profile-protected modes live here. `fix`
+  reads them through GhostSlice and never downgrades them.
+- **`.ghostverify.json`** (in the project, GhostVerify's own
+  config): currently one key, `test_command`, the command `post`
+  runs in the temporary copy when `--run-tests` is given.
+  `--test-command` on the command line overrides it:
+
+  ```json
+  { "test_command": "python3 -m pytest -q" }
+  ```
+
+If no test command is configured, `post` is static-only and says
+so plainly in its report, even when `--run-tests` is passed.
 
 ## Limits, stated plainly
 
@@ -157,6 +234,34 @@ configured, `post` is static-only and says so in its report.
 - **`fix` expands context, it does not fix code.** Patch problems
   are reported, never rewritten by GhostVerify.
 
+## Troubleshooting
+
+- **Exit 2, "bundle unreadable".** The bundle path is not a
+  directory, has no readable `manifest.json`, or the manifest is
+  not valid JSON with a `files` list. Re-export the bundle with
+  GhostSlice; a bundle that cannot be read is never passed.
+- **Exit 2 from `fix`, "ghostslice exporter unavailable".**
+  GhostSlice is not importable in this environment. Install it,
+  put its `src/` on `PYTHONPATH`, set `GHOSTSLICE_SRC` to that
+  `src/` directory, or run from a workspace where a `ghostslice`
+  checkout sits next to this one. `pre` and `post` still work.
+- **Exit 2, "no analysable files or symbols".** The project path
+  has no source files GhostVerify can scan, or is not a directory.
+  Check that you passed project first and bundle second.
+- **`post` says "static-only" even with `--run-tests`.** No test
+  command is configured: pass `--test-command` or set
+  `test_command` in the project's `.ghostverify.json` (not in
+  `.ghostslice.json`).
+- **No report files appeared.** Reports go next to the bundle
+  (its parent directory), not inside it and not in the project,
+  unless `--out-dir` says otherwise or `--no-report` suppressed
+  them.
+- **A task word is listed as "ungrounded", not as a gap.** The
+  word matches no definition in the project (for example it is
+  only a local variable). A slice cannot include or exclude a
+  local, so GhostVerify reports it in plain words instead of
+  inventing a gap no expansion could close.
+
 ## Out of scope (v0.1)
 
 Running an agent, calling a model API, judging answer quality with
@@ -172,7 +277,11 @@ python3 -m pytest tests/test_fixtures.py -q   # fixtures only, no CLI needed
 
 The suite is black-box: CLI tests drive `pre` / `fix` / `post`
 and the MCP handshake as a subprocess and skip cleanly if no
-`ghostverify` CLI is discoverable. The fixture tests always run
+`ghostverify` CLI is discoverable. The `fix` tests also need
+GhostSlice discoverable (see "Do I need GhostSlice installed?"
+above); if this checkout is not sitting next to a `ghostslice`
+checkout, run the suite with, for example,
+`GHOSTSLICE_SRC=/path/to/ghostslice/src`. The fixture tests always run
 and pin the verification bar from the plan: a clean bundle that
 covers every called symbol, a planted-gap bundle in both gap
 shapes (`exclude` mode and manifest-absent), and patch fixtures
