@@ -1,0 +1,1 @@
+{"v": 1, "kind": "slice", "key": "a42b42c5bf348072436cd07b7570be384928620c4210fefa3a4fe42585a93541", "payload": {"text": "from .cli import main\n", "original_tokens": 22, "sliced_tokens": 5, "language": "python"}}

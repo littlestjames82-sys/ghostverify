@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ghostverify"
+version = "0.1.0"
+description = "Self-healing slice checker for GhostSlice: verifies a context bundle was enough before spend, and a patch holds after the run"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Ghost Developer Studio" }]
+keywords = ["llm", "context", "ghostslice", "verification", "agents"]
+dependencies = []
+
+[project.scripts]
+ghostverify = "ghostverify.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

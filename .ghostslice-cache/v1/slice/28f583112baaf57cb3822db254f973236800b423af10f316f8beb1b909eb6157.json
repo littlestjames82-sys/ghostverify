@@ -1,0 +1,1 @@
+{"v": 1, "kind": "slice", "key": "28f583112baaf57cb3822db254f973236800b423af10f316f8beb1b909eb6157", "payload": {"text": "\"\"\"GhostVerify: self-healing slice checker for GhostSlice.\"\"\"\n\n__version__ = '0.1.0'\n", "original_tokens": 71, "sliced_tokens": 29, "language": "python"}}
