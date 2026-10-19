@@ -92,6 +92,27 @@ def cli_available() -> bool:
     return cli_prefix() is not None
 
 
+_GHOSTSLICE_AVAILABLE: bool | None = None
+
+
+def ghostslice_available() -> bool:
+    """True when the GhostSlice integration is live (gsload finds it).
+
+    GhostVerify works standalone by design; the `fix` command's bundle
+    expansion uses GhostSlice's exporter when present and degrades
+    when it is not. Tests that assert exporter behavior skip without
+    it instead of failing, mirroring the cli_available() pattern.
+    """
+    global _GHOSTSLICE_AVAILABLE
+    if _GHOSTSLICE_AVAILABLE is None:
+        try:
+            from ghostverify.gsload import ghostslice_module
+            _GHOSTSLICE_AVAILABLE = ghostslice_module() is not None
+        except Exception:
+            _GHOSTSLICE_AVAILABLE = False
+    return _GHOSTSLICE_AVAILABLE
+
+
 def cli_env() -> dict:
     """Environment a CLI subprocess needs (PYTHONPATH for src runs)."""
     cli_prefix()

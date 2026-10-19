@@ -88,6 +88,8 @@ class TestContractFieldsOnCliReports(unittest.TestCase):
         self.assertEqual(report.get("verdict"), "could_not_verify")
         assert_contract_fields(self, report)
 
+    @unittest.skipUnless(helpers.ghostslice_available(),
+                         "GhostSlice integration not available")
     def test_fix_report_carries_contract_fields(self):
         bundle = helpers.make_bundle(
             self.tmp / "gap", modes={"pricing.py": "exclude"})

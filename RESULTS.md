@@ -105,3 +105,15 @@ The project's placement reason also picked the level up:
 "strongest verification level: static-analysis (static only: no
 tests executed, no live run)". GhostConsole's suite is unchanged
 and still passes: 103 passed.
+
+## Addendum, Oct 18, 2026 (CI diagnosis)
+
+The first CI run of this repo failed on every Python version while
+the suite passed locally. Root cause, reproduced locally: six
+fix-flow tests require the GhostSlice integration (gsload's sibling
+discovery), which a standalone checkout does not have. The product
+degrades by design in that case, so the tests now skip with a stated
+reason when GhostSlice is unavailable (helpers.ghostslice_available),
+and CI gained an `integration` job that checks out GhostSlice as a
+sibling so those tests run for real. Local counts after the change:
+standalone 75 passed + 6 skipped; integration live 81 passed.

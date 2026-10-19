@@ -232,6 +232,8 @@ class TestFixReportPaths(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="gv-seam-fix-"))
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
 
+    @unittest.skipUnless(helpers.ghostslice_available(),
+                         "GhostSlice integration not available")
     def test_fix_cites_no_bundle_it_did_not_write(self):
         project = _write_project(self.tmp / "project")
         bundle = _make_stripped_bundle(self.tmp / "bundle")
@@ -255,6 +257,8 @@ class TestFixReportPaths(unittest.TestCase):
                          "fix output dir appeared without a report "
                          "path being citable")
 
+    @unittest.skipUnless(helpers.ghostslice_available(),
+                         "GhostSlice integration not available")
     def test_fix_expanded_bundle_exists_when_written(self):
         project = helpers.copy_project(self.tmp / "project")
         bundle = helpers.make_bundle(

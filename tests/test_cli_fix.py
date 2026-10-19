@@ -33,6 +33,8 @@ class TestFix(unittest.TestCase):
         return helpers.run_cli(
             ["pre", str(self.project), str(bundle), "--task", TASK])
 
+    @unittest.skipUnless(helpers.ghostslice_available(),
+                         "GhostSlice integration not available")
     def test_fix_restores_a_passing_bundle(self):
         bundle = helpers.make_bundle(
             self.tmp / "gap", modes={"pricing.py": "exclude"})
@@ -71,6 +73,8 @@ class TestFix(unittest.TestCase):
         modes = {e["path"]: e["mode"] for e in manifest["files"]}
         self.assertEqual(modes["pricing.py"], "exclude")
 
+    @unittest.skipUnless(helpers.ghostslice_available(),
+                         "GhostSlice integration not available")
     def test_fix_reports_token_delta_and_rounds(self):
         bundle = helpers.make_bundle(
             self.tmp / "gap", modes={"pricing.py": "exclude"})
@@ -93,6 +97,8 @@ class TestFix(unittest.TestCase):
                            "expanded bundle must cost more tokens "
                            "than the gapped one")
 
+    @unittest.skipUnless(helpers.ghostslice_available(),
+                         "GhostSlice integration not available")
     def test_fix_on_a_clean_bundle_stays_passing(self):
         bundle = helpers.make_bundle(self.tmp / "clean")
         fixed = self.tmp / "fixed"
