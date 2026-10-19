@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
@@ -71,6 +72,45 @@ def _carryover(project_root: Path, bundle) -> dict:
     return out
 
 
+# ------------------------------------------------------- evidence contract
+# Shared evidence contract fields (see the ecosystem
+# EVIDENCE_CONTRACT_DRAFT): every verify-report.json states which
+# tool version produced it, when (UTC), and how strong the evidence
+# is. GhostVerify's honest level is "static-analysis": it compares a
+# bundle against the project statically and executes no project code
+# and no agent. The single exception is `post --run-tests`, which
+# runs the project's own configured test command against the patched
+# temporary copy; only when those tests actually ran does the report
+# state "tests-executed" (see run_post).
+
+LEVEL_STATIC = "static-analysis"
+LEVEL_TESTS = "tests-executed"
+LEVEL_BASIS_STATIC = (
+    "static-analysis: GhostVerify compares the bundle against the "
+    "project statically; it executes no project code and runs no "
+    "agent, so no stronger level is claimed")
+LEVEL_BASIS_TESTS = (
+    "tests-executed: post ran the project's own configured test "
+    "command against the patched temporary copy; the bundle and "
+    "patch checks themselves remain static analysis, and no agent "
+    "ran")
+
+
+def _utc_now() -> str:
+    """ISO 8601 UTC creation time for a report."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _contract_fields() -> dict:
+    """Evidence-contract fields shared by every report."""
+    return {
+        "tool_version": __version__,
+        "verification_level": LEVEL_STATIC,
+        "verification_level_basis": LEVEL_BASIS_STATIC,
+        "timestamp": _utc_now(),
+    }
+
+
 def _base_report(project_root, bundle, task) -> dict:
     """Report fields shared by every command, before verdicts are
     filled in. ``bundle_manifest_sha256`` makes a verdict
@@ -78,6 +118,7 @@ def _base_report(project_root, bundle, task) -> dict:
     return {
         "tool": "ghostverify",
         "version": __version__,
+        **_contract_fields(),
         "kind": "pre",
         "project": str(Path(project_root).resolve()),
         "bundle": str(bundle.path.resolve()),
@@ -104,7 +145,8 @@ def run_pre(project_root, bundle_path, task: str = "") -> dict:
     try:
         bundle = load_bundle(bundle_path)
     except BundleError as exc:
-        return {"tool": "ghostverify", "version": __version__, "kind": "pre",
+        return {"tool": "ghostverify", "version": __version__,
+                **_contract_fields(), "kind": "pre",
                 "verdict": "could_not_verify", "exit_code": 2,
                 "task": task or "", "gaps": [], "soft_gaps": [],
                 "ungrounded_requirements": [],
@@ -698,6 +740,19 @@ def run_post(project_root, bundle_path, patch_path, task: str = "",
             "findings": findings, "tests": tests, "diagnosis": diagnosis,
             "note": "patch was applied only to a temporary copy; the "
                     "working tree was never touched"}
+    if tests.get("status") in ("passed", "failed", "timeout"):
+        # The one flow that executes anything: `post --run-tests`
+        # ran the project's own configured test command against the
+        # patched temporary copy. That evidence is "tests-executed"
+        # under the shared contract (GhostBench uses the same word
+        # for the same act); everything else in this report stays
+        # static analysis, as the basis string says.
+        report["verification_level"] = LEVEL_TESTS
+        report["verification_level_basis"] = LEVEL_BASIS_TESTS
+        report["notes"].append(
+            "verification level is tests-executed because post ran "
+            "the project's own test command in the temporary copy; "
+            "the bundle and patch checks themselves are static")
     report["post"] = post
     report["verdict"] = verdict
     report["exit_code"] = 0 if verdict == "ok" else 1

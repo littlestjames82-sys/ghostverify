@@ -41,6 +41,11 @@ def render_markdown(report: dict) -> str:
         "",
         f"- Verdict: **{report.get('verdict', 'unknown')}** "
         f"(exit {report.get('exit_code', '?')})",
+        f"- Tool version: {report.get('tool_version', '')}",
+        f"- Verification level: {report.get('verification_level', '')}"
+        + (f" ({report['verification_level_basis']})"
+           if report.get("verification_level_basis") else ""),
+        f"- Timestamp (UTC): {report.get('timestamp', '')}",
         f"- Project: `{report.get('project', '')}`",
         f"- Bundle: `{report.get('bundle', '')}`",
         f"- Bundle manifest sha256: `{report.get('bundle_manifest_sha256', '')}`",

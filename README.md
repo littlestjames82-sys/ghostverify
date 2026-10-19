@@ -187,6 +187,25 @@ Every `pre` / `fix` / `post` run produces, next to the bundle:
   for GhostBench. A verdict is reproducible from this file plus the
   bundle manifest hash alone.
 
+Every `verify-report.json` also carries the shared evidence
+contract fields, so a report states on its own who produced it,
+when, and how strong the evidence is:
+
+- `tool_version`: the GhostVerify version that wrote the report
+  (the same version `ghostverify --version` reports; the older
+  `version` field is kept as well).
+- `verification_level` and `verification_level_basis`:
+  `static-analysis` — GhostVerify compares the bundle against the
+  project statically; it executes no project code and runs no
+  agent. The one exception is `post --run-tests`, which runs the
+  project's own configured test command against the patched
+  temporary copy; when those tests actually ran, the report states
+  `tests-executed` instead, and the basis string says exactly that.
+- `timestamp`: the report's creation time, ISO 8601 UTC.
+
+GhostConsole reads `tool_version` and `verification_level` from the
+report and shows them on the project's GhostVerify row.
+
 And, in the project:
 
 - `.ghostverify-history.jsonl`: one line per run (task, bundle
